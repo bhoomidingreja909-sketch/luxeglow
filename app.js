@@ -1079,8 +1079,36 @@ function handleCheckoutSubmit(e) {
     theme: {
       color: "#C9A96E"
     },
-    handler: function (response) {
-      // Payment Successful
+    handler: async function (response) {
+      // Prepare Order Record for Supabase
+      const orderRecord = {
+        customer_name: name,
+        customer_email: email,
+        customer_phone: phone,
+        address: address,
+        city: city,
+        state: state,
+        pincode: pincode,
+        amount_usd: totalAmountUSD,
+        amount_inr: amountInPaise / 100,
+        payment_id: response.razorpay_payment_id || 'pay_simulated_' + Date.now(),
+        status: 'completed',
+        items: cart.map(item => {
+          const p = products.find(prod => prod.id === item.productId);
+          return {
+            id: item.productId,
+            name: p ? p.name : 'Makeup Item',
+            shade: item.selectedShade,
+            quantity: item.quantity,
+            price: p ? p.price : 0
+          };
+        })
+      };
+
+      // Save Order to Supabase & Local Fallback
+      await saveOrderToSupabase(orderRecord);
+
+      // Payment Successful & Cart Clear
       cart = [];
       saveCart();
       updateCartUI();
@@ -1093,7 +1121,7 @@ function handleCheckoutSubmit(e) {
             </div>
             <h2>Order Placed Successfully!</h2>
             <p>Thank you <strong>${name}</strong> for your order. We've sent a confirmation email to <strong>${email}</strong>.</p>
-            <p style="font-size: 0.85rem; color: #8A8A8A; margin-bottom: 20px;">Payment ID: ${response.razorpay_payment_id}</p>
+            <p style="font-size: 0.85rem; color: #8A8A8A; margin-bottom: 20px;">Payment ID: ${response.razorpay_payment_id || orderRecord.payment_id}</p>
             <button class="btn-primary" onclick="closeCheckoutModal(); location.reload();">Continue Shopping</button>
           </div>
         `;
@@ -1110,7 +1138,244 @@ function handleCheckoutSubmit(e) {
   rzp.open();
 }
 
-// Event Listeners for Checkout
+// --- 12. Supabase Integration & Admin Panel (/admin-bba) ---
+
+// Supabase Credentials
+const SUPABASE_URL = "https://cveknyzpiiouwnrtwtcy.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN2ZWtueXpwaWlvdXducnR3dGN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODYwNTk0MjMsImV4cCI6MjEwMTYzNTQyM30.fMdnDIA6ChcHdbkCHTu81LY5s8HBx6z8SeMHiMvHZwA";
+
+// Admin Credentials
+const ADMIN_USERNAME = "bbaadmin";
+const ADMIN_PASSWORD = "LuxeGlowAdmin@2026";
+
+// Supabase Client instance (if SDK loaded)
+let supabaseClient = null;
+if (typeof window.supabase !== 'undefined') {
+  supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+}
+
+// Local Orders Cache fallback if table not yet created on Supabase
+let allOrders = [];
+
+// Save Order to Supabase (and local storage backup)
+async function saveOrderToSupabase(orderData) {
+  // Save to localStorage as backup
+  let localOrders = JSON.parse(localStorage.getItem('luxeGlowOrders') || '[]');
+  const orderWithTimestamp = { ...orderData, created_at: new Date().toISOString() };
+  localOrders.unshift(orderWithTimestamp);
+  localStorage.setItem('luxeGlowOrders', JSON.stringify(localOrders));
+
+  // If Supabase SDK client is available
+  if (supabaseClient) {
+    try {
+      const { data, error } = await supabaseClient
+        .from('orders')
+        .insert([orderData]);
+
+      if (error) {
+        console.warn('Supabase Insert Warning (table may need schema creation):', error.message);
+      } else {
+        console.log('✓ Order recorded to Supabase:', data);
+      }
+    } catch (e) {
+      console.warn('Supabase request exception:', e);
+    }
+  }
+}
+
+// Admin DOM Elements
+const AdminDOM = {
+  overlay: document.getElementById('adminOverlay'),
+  closeBtn: document.getElementById('adminClose'),
+  loginView: document.getElementById('adminLoginView'),
+  dashView: document.getElementById('adminDashboardView'),
+  loginForm: document.getElementById('adminLoginForm'),
+  usernameInput: document.getElementById('adminUsername'),
+  passwordInput: document.getElementById('adminPassword'),
+  loginError: document.getElementById('adminLoginError'),
+  logoutBtn: document.getElementById('adminLogoutBtn'),
+  refreshBtn: document.getElementById('adminRefreshBtn'),
+  searchInput: document.getElementById('adminSearchOrders'),
+  tableBody: document.getElementById('adminOrdersTableBody'),
+  statRevenue: document.getElementById('statRevenue'),
+  statOrders: document.getElementById('statOrders'),
+  statPaid: document.getElementById('statPaid')
+};
+
+// Check URL Hash or Path for /admin-bba
+function checkAdminRoute() {
+  const hash = window.location.hash;
+  const path = window.location.pathname;
+
+  if (hash === '#/admin-bba' || hash === '#admin-bba' || path.endsWith('/admin-bba')) {
+    openAdminModal();
+  }
+}
+
+function openAdminModal() {
+  if (AdminDOM.overlay) {
+    AdminDOM.overlay.classList.add('active');
+    document.body.style.overflow = 'hidden';
+
+    // Check if logged in already
+    if (sessionStorage.getItem('luxeGlowAdminAuth') === 'true') {
+      showAdminDashboard();
+    } else {
+      showAdminLogin();
+    }
+  }
+}
+
+function closeAdminModal() {
+  if (AdminDOM.overlay) {
+    AdminDOM.overlay.classList.remove('active');
+    document.body.style.overflow = '';
+  }
+  // Clear route hash if opened via hash
+  if (window.location.hash.includes('admin-bba')) {
+    history.pushState("", document.title, window.location.pathname + window.location.search);
+  }
+}
+
+function showAdminLogin() {
+  if (AdminDOM.loginView) AdminDOM.loginView.style.display = 'block';
+  if (AdminDOM.dashView) AdminDOM.dashView.style.display = 'none';
+  if (AdminDOM.loginError) AdminDOM.loginError.textContent = '';
+}
+
+function showAdminDashboard() {
+  if (AdminDOM.loginView) AdminDOM.loginView.style.display = 'none';
+  if (AdminDOM.dashView) AdminDOM.dashView.style.display = 'block';
+  fetchAdminOrders();
+}
+
+function handleAdminLogin(e) {
+  e.preventDefault();
+  const user = AdminDOM.usernameInput.value.trim();
+  const pass = AdminDOM.passwordInput.value.trim();
+
+  if (user === ADMIN_USERNAME && pass === ADMIN_PASSWORD) {
+    sessionStorage.setItem('luxeGlowAdminAuth', 'true');
+    showAdminDashboard();
+    showToast('Admin logged in successfully!');
+  } else {
+    if (AdminDOM.loginError) {
+      AdminDOM.loginError.textContent = 'Invalid Username or Password. Please try again.';
+    }
+  }
+}
+
+function handleAdminLogout() {
+  sessionStorage.removeItem('luxeGlowAdminAuth');
+  showAdminLogin();
+  showToast('Logged out of Admin Portal.');
+}
+
+async function fetchAdminOrders() {
+  if (AdminDOM.tableBody) {
+    AdminDOM.tableBody.innerHTML = `<tr><td colspan="7" class="admin-loading">Fetching transactions from Supabase database...</td></tr>`;
+  }
+
+  let orders = [];
+
+  // 1. Fetch from Supabase
+  if (supabaseClient) {
+    try {
+      const { data, error } = await supabaseClient
+        .from('orders')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (!error && data && data.length > 0) {
+        orders = data;
+      }
+    } catch (e) {
+      console.warn('Supabase fetch notice:', e);
+    }
+  }
+
+  // 2. Fallback / Merge with local storage orders
+  const localOrders = JSON.parse(localStorage.getItem('luxeGlowOrders') || '[]');
+
+  // Merge unique by payment_id
+  const orderMap = new Map();
+  orders.forEach(o => orderMap.set(o.payment_id || o.id, o));
+  localOrders.forEach(o => {
+    const key = o.payment_id || o.created_at;
+    if (!orderMap.has(key)) orderMap.set(key, o);
+  });
+
+  allOrders = Array.from(orderMap.values());
+
+  renderAdminOrdersTable(allOrders);
+}
+
+function renderAdminOrdersTable(ordersToRender) {
+  if (!AdminDOM.tableBody) return;
+
+  // Calculate statistics
+  const totalRev = ordersToRender.reduce((sum, o) => sum + (o.amount_inr || (o.amount_usd ? o.amount_usd * 83 : 0)), 0);
+  const totalCount = ordersToRender.length;
+  const paidCount = ordersToRender.filter(o => o.status === 'completed' || o.status === 'PAID').length;
+
+  if (AdminDOM.statRevenue) AdminDOM.statRevenue.textContent = `₹${totalRev.toLocaleString('en-IN')}`;
+  if (AdminDOM.statOrders) AdminDOM.statOrders.textContent = totalCount;
+  if (AdminDOM.statPaid) AdminDOM.statPaid.textContent = paidCount;
+
+  if (ordersToRender.length === 0) {
+    AdminDOM.tableBody.innerHTML = `<tr><td colspan="7" class="admin-loading">No transactions found in Supabase database yet. Place an order to test!</td></tr>`;
+    return;
+  }
+
+  AdminDOM.tableBody.innerHTML = ordersToRender.map(o => {
+    const dateStr = o.created_at ? new Date(o.created_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : 'Just now';
+    const itemsSummary = Array.isArray(o.items) 
+      ? o.items.map(i => `${i.name || 'Item'} (${i.shade || 'Default'}) ×${i.quantity || 1}`).join('<br>')
+      : 'Makeup Items';
+
+    return `
+      <tr>
+        <td><span style="font-size: 0.82rem; color: #8A8A8A;">${dateStr}</span></td>
+        <td>
+          <div class="admin-cust-name">${o.customer_name || 'Guest'}</div>
+          <div class="admin-cust-sub">📧 ${o.customer_email || 'N/A'}</div>
+          <div class="admin-cust-sub">📞 ${o.customer_phone || 'N/A'}</div>
+        </td>
+        <td>
+          <div style="font-size: 0.83rem; max-width: 180px;">${o.address || ''}, ${o.city || ''}, ${o.state || ''} ${o.pincode || ''}</div>
+        </td>
+        <td style="font-size: 0.82rem; color: #F5F0EB;">${itemsSummary}</td>
+        <td>
+          <div style="font-weight: 700; color: #C9A96E;">₹${o.amount_inr ? o.amount_inr.toLocaleString('en-IN') : (o.amount_usd ? (o.amount_usd * 83).toLocaleString('en-IN') : 0)}</div>
+          <div style="font-size: 0.75rem; color: #8A8A8A;">($${o.amount_usd ? o.amount_usd.toFixed(2) : 0})</div>
+        </td>
+        <td><span class="admin-pay-id">${o.payment_id || 'N/A'}</span></td>
+        <td><span class="admin-status-tag admin-status-completed">Completed</span></td>
+      </tr>
+    `;
+  }).join('');
+}
+
+// Search filter in admin panel
+function handleAdminSearch(e) {
+  const query = e.target.value.toLowerCase().trim();
+  if (!query) {
+    renderAdminOrdersTable(allOrders);
+    return;
+  }
+
+  const filtered = allOrders.filter(o => 
+    (o.customer_name && o.customer_name.toLowerCase().includes(query)) ||
+    (o.customer_email && o.customer_email.toLowerCase().includes(query)) ||
+    (o.customer_phone && o.customer_phone.toLowerCase().includes(query)) ||
+    (o.payment_id && o.payment_id.toLowerCase().includes(query)) ||
+    (o.city && o.city.toLowerCase().includes(query))
+  );
+
+  renderAdminOrdersTable(filtered);
+}
+
+// Event Listeners for Admin & Route Detection
 document.addEventListener('DOMContentLoaded', () => {
   if (CheckoutDOM.checkoutBtn) {
     CheckoutDOM.checkoutBtn.addEventListener('click', openCheckoutModal);
@@ -1129,4 +1394,21 @@ document.addEventListener('DOMContentLoaded', () => {
   if (CheckoutDOM.form) {
     CheckoutDOM.form.addEventListener('submit', handleCheckoutSubmit);
   }
+
+  // Admin Event Listeners
+  if (AdminDOM.closeBtn) AdminDOM.closeBtn.addEventListener('click', closeAdminModal);
+  if (AdminDOM.loginForm) AdminDOM.loginForm.addEventListener('submit', handleAdminLogin);
+  if (AdminDOM.logoutBtn) AdminDOM.logoutBtn.addEventListener('click', handleAdminLogout);
+  if (AdminDOM.refreshBtn) AdminDOM.refreshBtn.addEventListener('click', fetchAdminOrders);
+  if (AdminDOM.searchInput) AdminDOM.searchInput.addEventListener('input', handleAdminSearch);
+  if (AdminDOM.overlay) {
+    AdminDOM.overlay.addEventListener('click', (e) => {
+      if (e.target === AdminDOM.overlay) closeAdminModal();
+    });
+  }
+
+  // Detect /admin-bba in URL or Hash
+  checkAdminRoute();
+  window.addEventListener('hashchange', checkAdminRoute);
 });
+
