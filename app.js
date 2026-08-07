@@ -1273,12 +1273,12 @@ function handleAdminLogout() {
 
 async function fetchAdminOrders() {
   if (AdminDOM.tableBody) {
-    AdminDOM.tableBody.innerHTML = `<tr><td colspan="7" class="admin-loading">Fetching transactions from Supabase database...</td></tr>`;
+    AdminDOM.tableBody.innerHTML = `<tr><td colspan="7" class="admin-loading">Fetching live transactions from Supabase database...</td></tr>`;
   }
 
   let orders = [];
 
-  // 1. Fetch from Supabase
+  // 1. Fetch live orders from Supabase
   if (supabaseClient) {
     try {
       const { data, error } = await supabaseClient
@@ -1286,27 +1286,22 @@ async function fetchAdminOrders() {
         .select('*')
         .order('created_at', { ascending: false });
 
-      if (!error && data && data.length > 0) {
+      if (error) {
+        console.warn('Supabase fetch error:', error.message);
+      } else if (data) {
         orders = data;
       }
     } catch (e) {
-      console.warn('Supabase fetch notice:', e);
+      console.warn('Supabase fetch exception:', e);
     }
   }
 
-  // 2. Fallback / Merge with local storage orders
-  const localOrders = JSON.parse(localStorage.getItem('luxeGlowOrders') || '[]');
+  // 2. Merge local storage backup ONLY if Supabase returns nothing or offline
+  if (orders.length === 0) {
+    orders = JSON.parse(localStorage.getItem('luxeGlowOrders') || '[]');
+  }
 
-  // Merge unique by payment_id
-  const orderMap = new Map();
-  orders.forEach(o => orderMap.set(o.payment_id || o.id, o));
-  localOrders.forEach(o => {
-    const key = o.payment_id || o.created_at;
-    if (!orderMap.has(key)) orderMap.set(key, o);
-  });
-
-  allOrders = Array.from(orderMap.values());
-
+  allOrders = orders;
   renderAdminOrdersTable(allOrders);
 }
 
@@ -1323,14 +1318,25 @@ function renderAdminOrdersTable(ordersToRender) {
   if (AdminDOM.statPaid) AdminDOM.statPaid.textContent = paidCount;
 
   if (ordersToRender.length === 0) {
-    AdminDOM.tableBody.innerHTML = `<tr><td colspan="7" class="admin-loading">No transactions found in Supabase database yet. Place an order to test!</td></tr>`;
+    AdminDOM.tableBody.innerHTML = `<tr><td colspan="7" class="admin-loading">No live transactions found in your Supabase database yet. Place an order via checkout to see real-time data!</td></tr>`;
     return;
   }
 
   AdminDOM.tableBody.innerHTML = ordersToRender.map(o => {
     const dateStr = o.created_at ? new Date(o.created_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : 'Just now';
-    const itemsSummary = Array.isArray(o.items) 
-      ? o.items.map(i => `${i.name || 'Item'} (${i.shade || 'Default'}) ×${i.quantity || 1}`).join('<br>')
+    
+    let itemsList = [];
+    if (Array.isArray(o.items)) {
+      itemsList = o.items;
+    } else if (typeof o.items === 'string') {
+      try { itemsList = JSON.parse(o.items); } catch(e) {}
+    }
+
+    const itemsSummary = itemsList.length > 0 
+      ? itemsList.map(item => {
+          const i = (typeof item === 'string') ? JSON.parse(item) : item;
+          return `• ${i.name || 'Item'} (${i.shade || 'Standard'}) ×${i.quantity || 1}`;
+        }).join('<br>')
       : 'Makeup Items';
 
     return `
@@ -1346,8 +1352,8 @@ function renderAdminOrdersTable(ordersToRender) {
         </td>
         <td style="font-size: 0.82rem; color: #F5F0EB;">${itemsSummary}</td>
         <td>
-          <div style="font-weight: 700; color: #C9A96E;">₹${o.amount_inr ? o.amount_inr.toLocaleString('en-IN') : (o.amount_usd ? (o.amount_usd * 83).toLocaleString('en-IN') : 0)}</div>
-          <div style="font-size: 0.75rem; color: #8A8A8A;">($${o.amount_usd ? o.amount_usd.toFixed(2) : 0})</div>
+          <div style="font-weight: 700; color: #C9A96E;">₹${o.amount_inr ? Number(o.amount_inr).toLocaleString('en-IN') : (o.amount_usd ? (o.amount_usd * 83).toLocaleString('en-IN') : 0)}</div>
+          <div style="font-size: 0.75rem; color: #8A8A8A;">($${o.amount_usd ? Number(o.amount_usd).toFixed(2) : 0})</div>
         </td>
         <td><span class="admin-pay-id">${o.payment_id || 'N/A'}</span></td>
         <td><span class="admin-status-tag admin-status-completed">Completed</span></td>
